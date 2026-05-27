@@ -1,0 +1,34 @@
+[package]
+name = "zelle"
+version = "0.1.0"
+edition = "2021"
+authors = ["Weise Developer"]
+description = "Layer 1 Core Crypto-Blockchain Protocol with Stealth Networking"
+
+[dependencies]
+# Твій кастомний транспортний шар 0 з GitHub
+weise = { git = "https://github.com/maksymchornobab/weise", branch = "main" }
+
+# Мережеві залежності, необхідні для main.rs
+libp2p = { version = "0.53", features = ["tokio", "gossipsub", "macros"] }
+futures = "0.3"
+
+# Криптографія та Хешування
+blake3 = { version = "1.5", features = ["serde"] }
+
+# Серіалізація даних (переведення структур у байти і назад)
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Робота з асинхронністю та часом
+tokio = { version = "1.35", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Логування та дебаг
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1.0"
+ed25519-dalek = { version = "2.1", features = ["serde"] }
+rand = "0.8"
+hex = "0.4"
+chacha20poly1305 = "0.10"
