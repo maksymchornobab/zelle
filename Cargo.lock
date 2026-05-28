@@ -3145,7 +3145,7 @@ dependencies = [
 [[package]]
 name = "weise"
 version = "0.1.0"
-source = "git+https://github.com/maksymchornobab/weise?branch=main#3794452ec64718cf10ac8ab62ad68857d5b67183"
+source = "git+https://github.com/maksymchornobab/weise?branch=main#667762e59a7308f194fc0d14bcac0cdb817210f4"
 dependencies = [
  "futures",
  "libp2p",

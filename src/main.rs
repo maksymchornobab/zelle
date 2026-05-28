@@ -86,8 +86,22 @@ async fn main() {
         loop {
             tokio::select! {
                 // Команда від нашого власного терміналу: забираємо її з каналу і анонімно шлемо в мережу
+                // Команда від нашого власного терміналу
                 Some(payload_to_send) = rx_command.recv() => {
-                    let _ = transport.send_secure(&payload_to_send);
+                    if payload_to_send.starts_with("GARLIC_ROUTE:") {
+                        // Розбиваємо рядок на 3 частини: "GARLIC_ROUTE", "receiver_pubkey", "корисні дані (TX:...)"
+                        let parts: Vec<&str> = payload_to_send.splitn(3, ':').collect();
+                        if parts.len() == 3 {
+                            let receiver = parts[1];
+                            let data = parts[2];
+                            
+                            // Викликаємо метод, який ми щойно дописали в garlic.rs!
+                            let _ = transport.send_garlic(receiver, data);
+                        }
+                    } else {
+                        // Для звичайних службових повідомлень або фонового шуму
+                        let _ = transport.send_secure(&payload_to_send);
+                    }
                 }
 
                 // Кожні 20 секунд автоматично шлемо 512-байтний пакет-шум для маскування трафіку
@@ -108,16 +122,30 @@ async fn main() {
                     }
 
                     SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(libp2p::gossipsub::Event::Message { message, .. })) => {
-                        println!("[🕵️‍♂️ DEBUG 1] Зловили пакет з мережі! Довжина байтів: {}", message.data.len());
                         if let Some(decoded_text) = WeiseTransport::unpack(&message.data) {
                             println!("[🕵️‍♂️ DEBUG 2] Успішний розпак (unpack)! Довжина тексту: {}", decoded_text.len());
                             if decoded_text.is_empty() { 
-                                println!("[🕵️‍♂️ DEBUG] Текст порожній (це фоновий шум send_noise)");
                                 continue; 
                             }
 
-                            // Виводимо перші 40 символів, щоб побачити, який там префікс
-                            println!("[🕵️‍♂️ DEBUG 3] Початок тексту: {:?}", &decoded_text[..std::cmp::min(40, decoded_text.len())]);
+                            if decoded_text.starts_with("GARLIC:") {
+                                if let Ok(packet) = serde_json::from_str::<weise::garlic::GarlicPacket>(&decoded_text[7..]) {
+                                    for clove in packet.cloves {
+                                        if clove.next_hop == my_address {
+                                            if let Ok(inner_text) = String::from_utf8(clove.encrypted_payload) {
+
+                                                if inner_text.starts_with("TX:") {
+                                                    if let Ok(tx) = serde_json::from_str::<Transaction>(&inner_text[3..]) {
+                                                        zelle_clone.lock().await.add_transaction_to_mempool(tx);
+                                                        println!("[🧄 GARLIC SUCCESS] Розпаковано часниковий зубчик! Анонімну транзакцію додано в мемпул!");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
 
                             if decoded_text.starts_with("TX:") {
                                 println!("[🕵️‍♂️ DEBUG] Розпізнано префікс TX:");
@@ -204,10 +232,14 @@ async fn main() {
                     if bc.add_transaction_to_mempool(tx.clone()) {
                         if let Ok(tx_json) = serde_json::to_string(&tx) {
                             
-                            // Передаємо пакет у внутрішній канал. Мережевий потік підхопить його
-                            let tx_payload = format!("TX:{}", tx_json);
-                            tx_command_clone.send(tx_payload).await.unwrap();
-                            println!("[🚀 QUEUED] Транзакцію поставлено в чергу на анонімну відправку через weise!");
+                            // 🔥 НОВИЙ ЧАСНИКОВИЙ ШЛЯХ:
+                            // Замість прямої відправки "TX:...", ми формуємо інструкцію для weise.
+                            // Передаємо через двокрапку: GARLIC_ROUTE : [публічний_ключ_отримувача] : [JSON_транзакції]
+                            let garlic_instruction = format!("GARLIC_ROUTE:{}:TX:{}", receiver_pubkey, tx_json);
+                            
+                            // Кидаємо інструкцію в канал, потік її підхопить
+                            tx_command_clone.send(garlic_instruction).await.unwrap();
+                            println!("[🧄 GARLIC QUEUED] Транзакцію запаковано в зубчик і поставлено в чергу часникового транспорту!");
                         }
                     }
                 }
