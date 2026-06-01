@@ -1,7 +1,6 @@
 use crate::transaction::Transaction;
 use std::collections::HashSet;
 
-// Жорстка конституція токеноміки Zelle
 pub const MAX_SUPPLY: f64 = 1_000_000.0;
 
 pub struct Block {
@@ -17,9 +16,7 @@ pub struct Blockchain {
     pub chain: Vec<Block>,
     pub mempool: Vec<Transaction>,
     pub difficulty: usize,
-    // Перелік уже активованих одноразових адрес (ефемерних точок) у поточній сесії RAM
     pub spent_ephemeral_addresses: HashSet<String>,
-    // Прапорець, який блокує повторну емісію
     pub is_genesis_minted: bool,
 }
 
@@ -34,7 +31,6 @@ impl Blockchain {
         }
     }
 
-    /// Єдиний легальний спосіб створити токени в системі. Може бути викликаний лише раз.
     pub fn init_genesis(&mut self, developer_address: String) -> bool {
         if self.is_genesis_minted || !self.chain.is_empty() {
             println!("[❌ CONSENSUS ERROR] Критичне порушення: спроба повторного мінту токенів!");
@@ -44,8 +40,8 @@ impl Blockchain {
         let genesis_tx = Transaction::new(
          "SYSTEM".to_string(),
          developer_address,
-         MAX_SUPPLY, // Видаємо весь фіксований обсяг
-         vec!["GENESIS_POINT".to_string()], // Тепер це правильний Vec<String>
+         MAX_SUPPLY, 
+         vec!["GENESIS_POINT".to_string()], 
         );
 
         let mut genesis_block = Block {
@@ -71,13 +67,11 @@ impl Blockchain {
             return false;
         }
 
-        // Захист від Replay: якщо ефемерна адреса виходу вже фігурувала в RAM, транзакція дропається
         if self.spent_ephemeral_addresses.contains(&tx.ephemeral_receiver) {
             println!("[🚫 VALIDATOR ERROR] Відхилено Алісу: Ефемерна точка {} вже була погашена!", tx.ephemeral_receiver);
             return false;
         }
 
-        // Перевірка закону збереження маси: ніякого мінту всередині звичайних транзакцій
         if tx.sender_address == "SYSTEM" && self.is_genesis_minted {
             println!("[❌ VALIDATOR ERROR] Відхилено: Спроба нелегальної емісії через SYSTEM!");
             return false;
@@ -94,7 +88,7 @@ impl Blockchain {
         let last_block = self.chain.last().unwrap().clone();
         let mut new_block = Block {
             index: last_block.index + 1,
-            timestamp: 1779791924, // 2026-05-26
+            timestamp: 1779791924, 
             transactions: self.mempool.clone(),
             prev_hash: last_block.hash.clone(),
             hash: String::new(),
@@ -113,7 +107,6 @@ impl Blockchain {
 
         println!("[MINER] Блок #{} успішно замайнено в RAM двигуна!", new_block.index);
         
-        // Помічаємо ефемерні адреси як використані
         for tx in &self.mempool {
             self.spent_ephemeral_addresses.insert(tx.ephemeral_receiver.clone());
         }

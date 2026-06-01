@@ -9,6 +9,9 @@ use blake3::Hasher;
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit};
 
+// Імпортуємо твій контейнер захисту пам'яті
+use verteidiger::SecureSeed; 
+
 const BLOOM_FILTER_BYTES: usize = 32 * 1024; 
 const BLOOM_HASH_FUNCTIONS: u8 = 7;
 
@@ -63,7 +66,6 @@ impl BloomFilter {
     }
 }
 
-// Структура, яка буде зашифрована всередині файлу
 #[derive(Serialize, Deserialize, Clone)]
 struct WalletPayload {
     pub secret_seed_hex: String,
@@ -71,7 +73,6 @@ struct WalletPayload {
     pub bloom_filter: BloomFilter,
 }
 
-// Структура самого файлу на диску (має сіль для пароля та зашифроване тіло)
 #[derive(Serialize, Deserialize, Clone)]
 struct EncryptedWalletFile {
     pub salt_hex: String,
@@ -79,17 +80,18 @@ struct EncryptedWalletFile {
     pub ciphertext_hex: String,
 }
 
+// 🛡️ Оновлена структура гаманця
 pub struct Wallet {
-    pub signing_key: SigningKey,
+    // signing_key видалено звідси! Ключ тепер надійно схований всередині secret_seed
+    pub secret_seed: SecureSeed, 
     pub verifying_key: VerifyingKey,
     pub username: String,
-    // Зберігаємо ключ шифрування в RAM, щоб автоматично переписувати файл при зміні балансу
     encryption_key: [u8; 32], 
 }
 
 impl Wallet {
     pub fn load_or_create(username: &str) -> Self {
-        let filename = format!("{}_wallet.json", username);
+        let filename = format!("wallets/{}_wallet.json", username);
         let path = Path::new(&filename);
 
         if path.exists() {
@@ -108,12 +110,10 @@ impl Wallet {
 
             let cipher = ChaCha20Poly1305::new(Key::from_slice(&encryption_key));
             
-            // ВИПРАВЛЕННЯ: Зберігаємо вектори у змінні, щоб вони не дропалися завчасно
             let nonce_bytes = hex::decode(&encrypted_data.nonce_hex).unwrap();
             let nonce = Nonce::from_slice(&nonce_bytes);
             let ciphertext = hex::decode(&encrypted_data.ciphertext_hex).unwrap();
 
-            // ВИПРАВЛЕННЯ: Замінено ієрогліф на .map_err
             let decrypted_bytes = cipher.decrypt(nonce, ciphertext.as_ref())
                 .map_err(|_| panic!("🚨 АВАРІЙНИЙ БАН: Неправильний пароль або вміст файлу було підроблено/модифіковано хакером!"))
                 .unwrap();
@@ -121,18 +121,28 @@ impl Wallet {
             let payload: WalletPayload = serde_json::from_slice(&decrypted_bytes).unwrap();
 
             let seed_bytes = hex::decode(&payload.secret_seed_hex).unwrap();
-            let signing_key = SigningKey::from_bytes(&seed_bytes[..32].try_into().unwrap());
+            
+            // 🛡️ Крок 1: Отримуємо фіксований масив байтів для ініціалізації
+            let mut raw_seed = [0u8; 32];
+            raw_seed.copy_from_slice(&seed_bytes[..32]);
+
+            // 🛡️ Крок 2: Одразу ініціалізуємо SigningKey суто для деривації публічного ключа
+            let signing_key = SigningKey::from_bytes(&raw_seed);
             let verifying_key = VerifyingKey::from(&signing_key);
 
-            println!("[🔓 SUCCESS] Гаманець успішно дешифровано в RAM двигуна.");
+            // 🛡️ Крок 3: Загортаємо сирі байти в безпечний контейнер RAM Hardening
+            let secret_seed = SecureSeed::new(raw_seed);
 
-            Wallet { signing_key, verifying_key, username: username.to_string(), encryption_key }
+            println!("[🔓 SUCCESS] Гаманець успішно дешифровано, приватний ключ запечатано в захищену RAM.");
+
+            Wallet { secret_seed, verifying_key, username: username.to_string(), encryption_key }
         } else {
             println!("\n🆕 [СТВОРЕННЯ ГАМАНЦЯ] Встановіть надійний пароль для файлу `{}`:", filename);
             let password = Wallet::read_password_from_console();
 
             let mut seed = [0u8; 32];
             OsRng.fill_bytes(&mut seed);
+            
             let signing_key = SigningKey::from_bytes(&seed);
             let verifying_key = VerifyingKey::from(&signing_key);
             let seed_hex = hex::encode(seed);
@@ -148,8 +158,11 @@ impl Wallet {
                 bloom_filter: BloomFilter::new(),
             };
 
+            // 🛡️ Загортаємо згенерований сид у безпечний контейнер
+            let secret_seed = SecureSeed::new(seed);
+
             let mut wallet = Wallet { 
-                signing_key, 
+                secret_seed, 
                 verifying_key, 
                 username: username.to_string(), 
                 encryption_key 
@@ -158,15 +171,24 @@ impl Wallet {
             wallet.write_encrypted_to_disk(payload, &salt);
             println!("[💾 SECURE] Новий гаманець створено та запечатано шифром ChaCha20-Poly1305!");
 
+
+
             wallet
         }
     }
 
     pub fn get_address(&self) -> String { hex::encode(self.verifying_key.to_bytes()) }
-    pub fn sign(&self, message: &[u8]) -> Signature { self.signing_key.sign(message) }
+    
+    // 🛡️ Нова безпечна функція підпису! Вона відкриває ключ лише всередині замикання
+    pub fn sign(&self, message: &[u8]) -> Signature { 
+        self.secret_seed.use_seed(|raw_seed_bytes| {
+            let signing_key = SigningKey::from_bytes(raw_seed_bytes);
+            signing_key.sign(message)
+        }) // <--- Тут raw_seed_bytes автоматично знищується і затирається нулями
+    }
 
     pub fn get_state(&self) -> (f64, BloomFilter) {
-        let filename = format!("{}_wallet.json", self.username);
+        let filename = format!("wallets/{}_wallet.json", self.username);
         let mut file = File::open(filename).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
@@ -174,7 +196,6 @@ impl Wallet {
         let encrypted_data: EncryptedWalletFile = serde_json::from_str(&contents).unwrap();
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.encryption_key));
         
-        // ВИПРАВЛЕННЯ: Зберігаємо у змінну фіксованого часу життя
         let nonce_bytes = hex::decode(&encrypted_data.nonce_hex).unwrap();
         let nonce = Nonce::from_slice(&nonce_bytes);
         let ciphertext = hex::decode(&encrypted_data.ciphertext_hex).unwrap();
@@ -186,7 +207,7 @@ impl Wallet {
     }
 
     pub fn save_state(&self, balance: f64, bloom_filter: BloomFilter) {
-        let filename = format!("{}_wallet.json", self.username);
+        let filename = format!("wallets/{}_wallet.json", self.username);
         let mut file = File::open(&filename).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
@@ -195,7 +216,6 @@ impl Wallet {
 
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.encryption_key));
         
-        // 🔥 ВИПРАВЛЕННЯ ТУТ: Фіксуємо час життя вектора байтів
         let nonce_bytes = hex::decode(&encrypted_data.nonce_hex).unwrap();
         let nonce = Nonce::from_slice(&nonce_bytes);
         
@@ -209,9 +229,9 @@ impl Wallet {
             bloom_filter,
         };
 
-        // Перезаписуємо з новим nonce для безпеки
+        // Тимчасова заглушка для перезапису стану не потребує справжнього ключа
         let mut wallet_clone = Wallet {
-            signing_key: SigningKey::from_bytes(&[0u8; 32]), // фіктивна заглушка
+            secret_seed: SecureSeed::new([0u8; 32]), 
             verifying_key: self.verifying_key,
             username: self.username.clone(),
             encryption_key: self.encryption_key,
@@ -219,11 +239,9 @@ impl Wallet {
         wallet_clone.write_encrypted_to_disk(new_payload, &salt);
     }
 
-    /// Внутрішній метод для шифрування та збереження файлу на диск
     fn write_encrypted_to_disk(&mut self, payload: WalletPayload, salt: &[u8]) {
-        let filename = format!("{}_wallet.json", self.username);
+        let filename = format!("wallets/{}_wallet.json", self.username);
         
-        // Генеруємо випадковий унікальний Nonce (одноразовий код ініціалізації шифру)
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -231,7 +249,6 @@ impl Wallet {
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.encryption_key));
         let payload_bytes = serde_json::to_vec(&payload).unwrap();
         
-        // Шифруємо
         let ciphertext = cipher.encrypt(nonce, payload_bytes.as_ref())
             .expect("Помилка шифрування даних!");
 
@@ -245,7 +262,6 @@ impl Wallet {
         File::create(filename).unwrap().write_all(json_str.as_bytes()).unwrap();
     }
 
-    /// Перетворює пароль користувача на стійкий 32-байтний крипто-ключ за допомогою BLAKE3
     fn derive_key_from_password(password: &str, salt: &[u8]) -> [u8; 32] {
         let mut hasher = Hasher::new();
         hasher.update(salt);
@@ -253,7 +269,6 @@ impl Wallet {
         *hasher.finalize().as_bytes()
     }
 
-    /// Безпечне зчитування пароля з консолі
     fn read_password_from_console() -> String {
         let mut password = String::new();
         stdout().flush().unwrap();

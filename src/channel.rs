@@ -11,7 +11,6 @@ pub struct StateChannel {
 }
 
 impl StateChannel {
-    /// Відкриття каналу та фіксація стартових депозитів
     pub fn open(wallet_a: &Wallet, wallet_b: &Wallet, deposit_a: f64, deposit_b: f64) -> Self {
         let channel_id = blake3::hash(format!("{}{}", wallet_a.get_address(), wallet_b.get_address()).as_bytes())
             .to_hex()
@@ -29,11 +28,9 @@ impl StateChannel {
         }
     }
 
-    /// Стрімкі офчейн-платежі всередині каналу (в RAM)
     pub fn send_micro_transaction(&mut self, from_wallet: &Wallet, to_address: String, amount: f64) -> Option<Transaction> {
         let sender_address = from_wallet.get_address();
 
-        // Модифікуємо внутрішні баланси учасників сесії
         if sender_address == self.participant_a {
             if self.balance_a < amount { return None; }
             self.balance_a -= amount;
@@ -43,27 +40,22 @@ impl StateChannel {
             self.balance_b -= amount;
             self.balance_a += amount;
         } else {
-            return None; // Стороння нода не має доступу до каналу
+            return None; 
         }
 
-        // МАТЕМАТИКА ЕФЕМЕРНОЇ ТОЧКИ ДЛЯ L2:
-        // Генеруємо одноразову адресу для цього внутрішнього мікропереказу
         let mut entropy = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut entropy);
         let ephemeral_receiver = blake3::hash(format!("{}{}", to_address, hex::encode(entropy)).as_bytes())
             .to_hex()
             .to_string();
 
-        // Створюємо фейковий decoy для кільцевого підпису
         let mut decoy_bytes = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut decoy_bytes);
         let decoy = hex::encode(decoy_bytes);
         let ring_keys = vec![sender_address.clone(), decoy];
 
-        // Створюємо Layer 2 транзакцію
         let mut tx = Transaction::new(sender_address, ephemeral_receiver, amount, ring_keys);
         
-        // Прив'язуємо ID транзакції до унікального channel_id, щоб її не можна було використати в іншому каналі
         tx.tx_id = blake3::hash(format!("{}{}", tx.tx_id, self.channel_id).as_bytes())
             .to_hex()
             .to_string();
@@ -77,7 +69,6 @@ impl StateChannel {
         Some(tx)
     }
 
-    /// Закриття каналу. Формує фінальний чек для Layer 1
     pub fn close_and_settle(&mut self, from_wallet: &Wallet) -> Transaction {
         println!("[SHAR 2] Закриття каналу. Розрахунок фінального підсумку для Layer 1...");
 
@@ -88,14 +79,12 @@ impl StateChannel {
             self.participant_a.clone()
         };
 
-        // Визначаємо чистий фінальний баланс отримувача на Шар 2
         let final_amount = if receiver == self.participant_b {
             self.balance_b
         } else {
             self.balance_a
         };
 
-        // Генеруємо фінальну унікальну ефемерну адресу для виходу на Layer 1
         let mut entropy = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut entropy);
         let final_ephemeral_receiver = blake3::hash(format!("{}{}", receiver, hex::encode(entropy)).as_bytes())
@@ -107,7 +96,6 @@ impl StateChannel {
         let decoy = hex::encode(decoy_bytes);
         let ring_keys = vec![sender.clone(), decoy];
 
-        // Створюємо чисту L1-транзакцію фінального розрахунку
         let mut settlement_tx = Transaction::new(
             sender,
             final_ephemeral_receiver,

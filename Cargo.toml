@@ -8,6 +8,7 @@ description = "Layer 1 Core Crypto-Blockchain Protocol with Stealth Networking"
 [dependencies]
 # Твій кастомний транспортний шар 0 з GitHub
 weise = { git = "https://github.com/maksymchornobab/weise", branch = "main" }
+verteidiger = {git = "https://github.com/maksymchornobab/verteidiger", branch = "main"}
 
 # Мережеві залежності, необхідні для main.rs
 libp2p = { version = "0.53", features = ["tokio", "gossipsub", "macros"] }

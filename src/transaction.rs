@@ -5,9 +5,9 @@ use ed25519_dalek::{VerifyingKey, Signature, Verifier};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Transaction {
     pub sender_address: String,
-    pub ephemeral_receiver: String, // Одноразова криптографічна точка (One-Time Address)
+    pub ephemeral_receiver: String, 
     pub amount: f64,
-    pub ring_public_keys: Vec<String>, // Для кільцевої стелс-анонімності
+    pub ring_public_keys: Vec<String>, 
     pub tx_id: String,
     pub signature: Vec<u8>,
 }

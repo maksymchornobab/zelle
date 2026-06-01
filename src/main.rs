@@ -14,8 +14,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
 use weise::{WeiseTransport, MyBehaviourEvent};
-use libp2p::futures::StreamExt; // Потрібно для циклу .select_next_some()
-use libp2p::swarm::SwarmEvent; // Правильний імпорт для нових версій libp2p
+use libp2p::futures::StreamExt; 
+use libp2p::swarm::SwarmEvent;
 
 #[tokio::main]
 async fn main() {
@@ -28,15 +28,15 @@ async fn main() {
     let role = args[1].clone();
     let username = args[2].clone();
 
-    // 1. Ініціалізуємо блокчейн
+
     let mut blockchain = Blockchain::new();
     
-    // 2. Створюємо або завантажуємо гаманець
+
     let my_wallet = Wallet::load_or_create(&username);
     let my_address = my_wallet.get_address();
 
     if role == "server" && username == "developer" {
-        // Запускаємо Генезис-блок у RAM автоматично
+
         if blockchain.init_genesis(my_address.clone()) {
             
             let (current_balance, bloom_filter) = my_wallet.get_state();
@@ -55,12 +55,10 @@ async fn main() {
     let my_wallet_arc = Arc::new(my_wallet);
     let my_wallet_clone = Arc::clone(&my_wallet_arc);
 
-    // --- P2P NETWORK LAYER ---
-    // Ініціалізуємо анонімний P2P транспорт з твого SDK weise
+
     let mut transport = WeiseTransport::new().expect("Не вдалося запустити Weise SDK");
     println!("[🛰️ WEISE P2P ЗАПУЩЕНО] Мій Peer ID: {}", transport.local_peer_id);
 
-    // Якщо користувач запустився як клієнт, підключаємо його до сервера
     if role == "client" {
         println!("[🔌 CONNECT] Введіть Multiaddr адресу сервера для підключення (наприклад, /ip4/127.0.0.1/tcp/XXXXX):");
         let mut server_addr_str = String::new();
@@ -74,42 +72,61 @@ async fn main() {
         }
     }
 
-    // Налаштовуємо таймер для фоного стелс-шуму (Chaffing)
-    let mut noise_timer = tokio::time::interval(tokio::time::Duration::from_secs(20));
+    let mut noise_timer = tokio::time::interval(tokio::time::Duration::from_secs(10));
 
-    // Створюємо асинхронний канал зв'язку між терміналом команд та мережею weise
     let (tx_command, mut rx_command) = tokio::sync::mpsc::channel::<String>(32);
     let tx_command_clone = tx_command.clone();
+    let address_for_net = my_address.clone();
+    let mut pending_garlic: Option<(String, String)> = None;
+    let mut pending_secure: Option<String> = None;
 
-    // Запускаємо єдиний асинхронний P2P потік
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                // Команда від нашого власного терміналу: забираємо її з каналу і анонімно шлемо в мережу
-                // Команда від нашого власного терміналу
+
                 Some(payload_to_send) = rx_command.recv() => {
-                    if payload_to_send.starts_with("GARLIC_ROUTE:") {
-                        // Розбиваємо рядок на 3 частини: "GARLIC_ROUTE", "receiver_pubkey", "корисні дані (TX:...)"
-                        let parts: Vec<&str> = payload_to_send.splitn(3, ':').collect();
-                        if parts.len() == 3 {
-                            let receiver = parts[1];
-                            let data = parts[2];
-                            
-                            // Викликаємо метод, який ми щойно дописали в garlic.rs!
-                            let _ = transport.send_garlic(receiver, data);
-                        }
-                    } else {
-                        // Для звичайних службових повідомлень або фонового шуму
-                        let _ = transport.send_secure(&payload_to_send);
+    if payload_to_send.starts_with("GARLIC_ROUTE:") {
+        let parts: Vec<&str> = payload_to_send.splitn(3, ':').collect();
+        if parts.len() == 3 {
+            let receiver = parts[1].to_string();
+            let data = parts[2].to_string();
+            
+            // Ховаємо транзу в кишеню мережевого потоку
+            pending_garlic = Some((receiver, data));
+            println!("[📝 QUEUED] Транзакцію затиснуто в такт мережі.");
+        }
+    } 
+    // 🔥 НОВИЙ БЛОК: перехоплюємо блок від терміналу
+    else if payload_to_send.starts_with("TICK_MINED:") {
+        let mined_data = payload_to_send.replacen("TICK_MINED:", "", 1);
+        let final_payload = format!("MINED:{}", mined_data); 
+        
+        // Ховаємо блок у кишеню МЕРЕЖЕВОГО потоку (тепер такт його побачить!)
+        pending_secure = Some(final_payload);
+        println!("[🔒 LOCK] Мережевий потік заблокував блок до наступного такту.");
+    } 
+    else {
+        let _ = transport.send_secure(&payload_to_send);
+    }
+}
+
+                _ = noise_timer.tick() => {
+                    // 1. Спочатку перевіряємо, чи є замайнений блок для синхронізації
+                    if let Some(mined_payload) = pending_secure.take() {
+                        println!("[🚀 TICK TRANSMIT] Ритм! Відправляємо замайнений БЛОК в мережу.");
+                        let _ = transport.send_secure(&mined_payload);
+                    } 
+                    // 2. Якщо блоку немає, перевіряємо, чи є часникова транзакція
+                    else if let Some((receiver, data)) = pending_garlic.take() {
+                        println!("[🚀 TICK TRANSMIT] Ритм! Відправляємо РЕАЛЬНУ транзакцію.");
+                        let _ = transport.send_garlic(&receiver, &data);
+                    } 
+                    // 3. Якщо в обох кишенях порожньо — стріляємо маскувальним шумом
+                    else {
+                        let _ = transport.send_noise();
                     }
                 }
 
-                // Кожні 20 секунд автоматично шлемо 512-байтний пакет-шум для маскування трафіку
-                _ = noise_timer.tick() => {
-                    let _ = transport.send_noise();
-                }
-
-                // Обробляємо події P2P мережі
                 event = transport.swarm.select_next_some() => match event {
                     SwarmEvent::NewListenAddr { address, .. } => {
                         println!("\n[🔥 МЕРЕЖА ОНЛАЙН] Твоя унікальна P2P-адреса:");
@@ -129,22 +146,54 @@ async fn main() {
                             }
 
                             if decoded_text.starts_with("GARLIC:") {
-                                if let Ok(packet) = serde_json::from_str::<weise::garlic::GarlicPacket>(&decoded_text[7..]) {
-                                    for clove in packet.cloves {
-                                        if clove.next_hop == my_address {
-                                            if let Ok(inner_text) = String::from_utf8(clove.encrypted_payload) {
+                                println!("[🕵️‍♂️ STEP 1: NETWORK] Дев зловив пакет GARLIC з мережі!");
 
-                                                if inner_text.starts_with("TX:") {
-                                                    if let Ok(tx) = serde_json::from_str::<Transaction>(&inner_text[3..]) {
-                                                        zelle_clone.lock().await.add_transaction_to_mempool(tx);
-                                                        println!("[🧄 GARLIC SUCCESS] Розпаковано часниковий зубчик! Анонімну транзакцію додано в мемпул!");
+                                match serde_json::from_str::<weise::garlic::GarlicPacket>(&decoded_text[7..]) {
+                                Ok(packet) => {
+                                  println!("[🕵️‍♂️ STEP 2: PARSE] JSON успішно розпарсено у GarlicPacket. Кількість зубчиків: {}", packet.cloves.len());
+            
+                                  for (i, clove) in packet.cloves.iter().enumerate() {
+                                       println!(
+                                           "[🕵️‍♂️ STEP 3: HOP CHECK] Зубчик #{}. clove.next_hop = '{}', а мій address_for_net = '{}'", 
+                                         i, clove.next_hop, address_for_net
+                                        );
+                
+                                     if clove.next_hop == address_for_net {
+                                          println!("[🕵️‍♂️ STEP 4: ADDRESS MATCH] Адреси збіглися! Розпаковуємо payload...");
+                    
+                                         match String::from_utf8(clove.encrypted_payload.clone()) {
+                                          Ok(inner_text) => {
+                                               println!("[🕵️‍♂️ STEP 5: PAYLOAD UTF8] Текст всередині зубчика: '{}'", inner_text);
+                            
+                                              if inner_text.starts_with("TX:") {
+                                                  match serde_json::from_str::<Transaction>(&inner_text[3..]) {
+                                                     Ok(tx) => {
+                                                         let mut bc_lock = zelle_clone.lock().await;
+                                                         let added = bc_lock.add_transaction_to_mempool(tx.clone());
+                                        
+                                                         println!(
+                                                             "[🕵️‍♂️ STEP 6: MEMPOOL] Результат add_transaction_to_mempool: {}. Поточний розмір мемпулу в RAM: {}", 
+                                                             added, bc_lock.mempool.len()
+                                                            );
+                                        
+                                                         println!("[🧄 GARLIC SUCCESS] Транзакцію Аліси успішно додано в мемпул Дева!");
+                                                        },
+                                                        Err(e) => println!("[❌ ERROR] Не вдалося розпарсити Transaction JSON: {:?}", e),
                                                     }
-                                                }
+                                                } else {
+                                                     println!("[❌ ERROR] Вміст зубчика не починається з 'TX:'");
+                                                    }
+                                            },
+                                            Err(e) => println!("[❌ ERROR] Не вдалося конвертувати payload у UTF-8 рядок: {:?}", e),
+                                         }
+                                        } else {
+                                             println!("[⚠️ STEP 3: SKIP] Цей зубчик призначений не мені, проскакуємо.");
                                             }
-                                        }
                                     }
-                                }
+                                },
+                                Err(e) => println!("[❌ ERROR] Не вдалося розпарсити GarlicPacket JSON: {:?}", e),
                             }
+                        }
 
 
                             if decoded_text.starts_with("TX:") {
@@ -232,12 +281,10 @@ async fn main() {
                     if bc.add_transaction_to_mempool(tx.clone()) {
                         if let Ok(tx_json) = serde_json::to_string(&tx) {
                             
-                            // 🔥 НОВИЙ ЧАСНИКОВИЙ ШЛЯХ:
-                            // Замість прямої відправки "TX:...", ми формуємо інструкцію для weise.
-                            // Передаємо через двокрапку: GARLIC_ROUTE : [публічний_ключ_отримувача] : [JSON_транзакції]
+
                             let garlic_instruction = format!("GARLIC_ROUTE:{}:TX:{}", receiver_pubkey, tx_json);
                             
-                            // Кидаємо інструкцію в канал, потік її підхопить
+
                             tx_command_clone.send(garlic_instruction).await.unwrap();
                             println!("[🧄 GARLIC QUEUED] Транзакцію запаковано в зубчик і поставлено в чергу часникового транспорту!");
                         }
@@ -247,17 +294,31 @@ async fn main() {
             
             else if text == "mine" {
                 let mut bc = zelle.lock().await;
+
+                println!("[🕵️‍♂️ MINE COMMAND] Натиснуто 'mine'. Вектор bc.mempool містить {} елементів.", bc.mempool.len());
+                
+                if !bc.mempool.is_empty() {
+                    for (i, tx) in bc.mempool.iter().enumerate() {
+                        println!("  -> [📝 MEMPOOL ITEM #{}] ID: {}, Від: {}, Ефемерний отримувач: {}", 
+                            i, tx.tx_id, tx.sender_address, tx.ephemeral_receiver
+                        );
+                    }
+                }
+
                 let mined_txs = bc.mine_pending_transactions();
                 if !mined_txs.is_empty() {
                     update_my_account_state(&my_wallet_arc, mined_txs.clone());
                     
                     if let Ok(txs_json) = serde_json::to_string(&mined_txs) {
+                        let mined_payload = format!("TICK_MINED:{}", txs_json);
                         
-                        // Передаємо замайнений блок у канал для розсилки нодам
-                        let mined_payload = format!("MINED:{}", txs_json);
                         tx_command_clone.send(mined_payload).await.unwrap();
-                        println!("[⛏️ QUEUED] Блок замайнено та додано в чергу синхронізації!");
+                        println!("[⛏️ QUEUED] Блок замайнено локально! Відправлено в чергу мережевого такту.");
                     }
+                } else {
+                    println!("[⚠️ MINING REFUSED] Не вдалося замайнити блок. Можливі причини:");
+                    println!("  1. Мемпул порожній.");
+                    println!("  2. Блокчейн відхилив транзакцію під час валідації.");
                 }
             }
         }
