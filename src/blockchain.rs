@@ -38,10 +38,10 @@ impl Blockchain {
         }
 
         let genesis_tx = Transaction::new(
-         "SYSTEM".to_string(),
-         developer_address,
-         MAX_SUPPLY, 
-         vec!["GENESIS_POINT".to_string()], 
+            "SYSTEM".to_string(),
+            developer_address,
+            MAX_SUPPLY, 
+            vec!["GENESIS_POINT".to_string()], 
         );
 
         let mut genesis_block = Block {
@@ -62,13 +62,14 @@ impl Blockchain {
     }
 
     pub fn add_transaction_to_mempool(&mut self, tx: Transaction) -> bool {
+        // 🔥 Тут викликається внутрішня перевірка кільця з transaction.rs
         if !tx.verify_signature() {
             println!("[VALIDATOR ERROR] Відхилено: Зламаний кільцевий підпис або підроблені дані!");
             return false;
         }
 
         if self.spent_ephemeral_addresses.contains(&tx.ephemeral_receiver) {
-            println!("[🚫 VALIDATOR ERROR] Відхилено Алісу: Ефемерна точка {} вже була погашена!", tx.ephemeral_receiver);
+            println!("[🚫 VALIDATOR ERROR] Відхилено: Ефемерна точка {} вже була погашена!", tx.ephemeral_receiver);
             return false;
         }
 
@@ -77,7 +78,7 @@ impl Blockchain {
             return false;
         }
 
-        println!("[MEMPOOL] Валідація успішна. Транзакцію додано в RAM-вузол: {} ZL", tx.amount);
+        println!("[MEMPOOL] Валідація успішна. Кільцеву транзакцію додано в RAM-вузол: {} ZL", tx.amount);
         self.mempool.push(tx);
         true
     }

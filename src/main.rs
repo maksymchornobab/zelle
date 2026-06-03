@@ -8,7 +8,9 @@ use transaction::Transaction;
 use wallet::Wallet;
 
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, Write, Read};
+use std::path::Path;
+use std::fs::{self, File};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
@@ -16,6 +18,53 @@ use tokio::sync::Mutex;
 use weise::{WeiseTransport, MyBehaviourEvent};
 use libp2p::futures::StreamExt; 
 use libp2p::swarm::SwarmEvent;
+
+const MAX_DECOYS_LIMIT: usize = 5; // Максимальний ліміт адрес у файлі
+const DECOYS_FILE_PATH: &str = "wallets/decoys_pool.json";
+
+pub struct PersistentDecoyPool {
+    pub addresses: Vec<String>,
+}
+
+impl PersistentDecoyPool {
+    /// Завантажує пул із диска або створює новий, якщо файлу немає
+    pub fn load_or_create() -> Self {
+        let _ = fs::create_dir_all("wallets");
+        let path = Path::new(DECOYS_FILE_PATH);
+
+        if path.exists() {
+            if let Ok(mut file) = File::open(path) {
+                let mut contents = String::new();
+                if file.read_to_string(&mut contents).is_ok() {
+                    if let Ok(addresses) = serde_json::from_str::<Vec<String>>(&contents) {
+                        return PersistentDecoyPool { addresses };
+                    }
+                }
+            }
+        }
+        PersistentDecoyPool { addresses: Vec::new() }
+    }
+
+    /// Додає нову адресу за принципом FIFO та зберігає файл на диск
+    pub fn insert_and_save(&mut self, new_address: String, my_address: &str) {
+        if new_address.is_empty() || new_address == my_address || self.addresses.contains(&new_address) {
+            return;
+        }
+
+        // Якщо ліміт перевищено — видаляємо найстарішу адресу (FIFO)
+        if self.addresses.len() >= MAX_DECOYS_LIMIT {
+            self.addresses.remove(0);
+        }
+
+        self.addresses.push(new_address);
+
+        if let Ok(json_str) = serde_json::to_string_pretty(&self.addresses) {
+            if let Ok(mut file) = File::create(DECOYS_FILE_PATH) {
+                let _ = file.write_all(json_str.as_bytes());
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -34,6 +83,9 @@ async fn main() {
 
     let my_wallet = Wallet::load_or_create(&username);
     let my_address = my_wallet.get_address();
+
+    let decoy_pool = Arc::new(Mutex::new(PersistentDecoyPool::load_or_create()));
+    println!("[💾 DECOY POOL] Успішно завантажено приманок з диска: {}", decoy_pool.lock().await.addresses.len());
 
     if role == "server" && username == "developer" {
 
@@ -54,6 +106,7 @@ async fn main() {
     let zelle_clone = Arc::clone(&zelle);
     let my_wallet_arc = Arc::new(my_wallet);
     let my_wallet_clone = Arc::clone(&my_wallet_arc);
+    let decoy_pool_net_clone = Arc::clone(&decoy_pool);
 
 
     let mut transport = WeiseTransport::new().expect("Не вдалося запустити Weise SDK");
@@ -210,6 +263,15 @@ async fn main() {
                                 println!("[🕵️‍♂️ DEBUG] Розпізнано префікс MINED:");
                                 match serde_json::from_str::<Vec<Transaction>>(&decoded_text[6..]) {
                                     Ok(txs) => {
+
+                                        let mut pool = decoy_pool_net_clone.lock().await;
+                                        for tx in &txs {
+                                            for key in &tx.ring_public_keys {
+                                                pool.insert_and_save(key.clone(), &my_wallet_clone.get_address());
+                                            }
+                                        }
+                                        drop(pool);
+
                                         update_my_account_state(&my_wallet_clone, txs);
                                         println!("[🥷 WEISE SUCCESS] Спіймано і синхронізовано блок монет!");
                                     }
@@ -267,30 +329,51 @@ async fn main() {
                     let ephemeral_receiver = blake3::hash(format!("{}{}", receiver_pubkey, hex::encode(entropy)).as_bytes())
                         .to_hex()
                         .to_string();
+                    
+                    let mut ring_keys = vec![my_address.clone()];
+                    let pool = decoy_pool.lock().await;
 
-                    let mut decoy_bytes = [0u8; 32];
-                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut decoy_bytes);
-                    let decoy = hex::encode(decoy_bytes);
-                    let ring_keys = vec![my_address.clone(), decoy];
+                    let valid_decoys: Vec<&String> = pool.addresses.iter()
+                        .filter(|&addr| addr != &my_address)
+                        .collect();
+                    
+                    if valid_decoys.is_empty() {
+                        // Якщо чистих приманок немає (перший запуск), робимо локальний decoy
+                        println!("[⚠️ RING WARNING] У JSON немає чужих адрес. Генеруємо випадковий decoy.");
+                        let mut decoy_bytes = [0u8; 32];
+                        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut decoy_bytes);
+                        ring_keys.push(hex::encode(decoy_bytes));
+                    } else {
+                        // 🔥 Тепер лог ТОЧНО з'явиться в консолі!
+                        println!("[🛡️ RING] Вибираємо довготривалі реальні адреси з файлу decoys_pool.json...");
+                        
+                        use rand::seq::SliceRandom;
+                        // Вибираємо до 2-х випадкових адрес із тих, що є у файлі
+                        let chosen_decoys = valid_decoys.choose_multiple(&mut rand::rngs::OsRng, 2);
+                        for &decoy in chosen_decoys {
+                            println!("[🛡️ RING ITEM] Додано приманку: {}", &decoy[..10]);
+                            ring_keys.push(decoy.clone());
+                        }
+                    }
+                    drop(pool); // Звільняємо файл
 
-                    let mut tx = Transaction::new(my_address.clone(), ephemeral_receiver, amount, ring_keys);
-                    let sig = my_wallet_arc.sign(tx.tx_id.as_bytes());
-                    tx.signature = sig.to_bytes().to_vec();
+                    use rand::seq::SliceRandom;
+                    ring_keys.shuffle(&mut rand::rngs::OsRng);
+
+                    let mut tx = Transaction::new(my_address.clone(), ephemeral_receiver, amount, ring_keys.clone());
+                    let ring_sig = my_wallet_arc.sign_ring(tx.tx_id.as_bytes(), &ring_keys);
+                    tx.signature = Some(ring_sig);
 
                     let mut bc = zelle.lock().await;
                     if bc.add_transaction_to_mempool(tx.clone()) {
                         if let Ok(tx_json) = serde_json::to_string(&tx) {
-                            
-
                             let garlic_instruction = format!("GARLIC_ROUTE:{}:TX:{}", receiver_pubkey, tx_json);
-                            
-
                             tx_command_clone.send(garlic_instruction).await.unwrap();
-                            println!("[🧄 GARLIC QUEUED] Транзакцію запаковано в зубчик і поставлено в чергу часникового транспорту!");
+                            println!("[🧄 GARLIC QUEUED] Кільцеву анонімну транзакцію запаковано в часниковий такт!");
                         }
                     }
                 }
-            } 
+            }
             
             else if text == "mine" {
                 let mut bc = zelle.lock().await;
@@ -299,14 +382,23 @@ async fn main() {
                 
                 if !bc.mempool.is_empty() {
                     for (i, tx) in bc.mempool.iter().enumerate() {
-                        println!("  -> [📝 MEMPOOL ITEM #{}] ID: {}, Від: {}, Ефемерний отримувач: {}", 
-                            i, tx.tx_id, tx.sender_address, tx.ephemeral_receiver
+                        println!("  -> [📝 MEMPOOL ITEM #{}] ID: {}, Ефемерний отримувач: {}", 
+                            i, tx.tx_id, tx.ephemeral_receiver
                         );
                     }
                 }
 
                 let mined_txs = bc.mine_pending_transactions();
                 if !mined_txs.is_empty() {
+
+                    let mut pool = decoy_pool.lock().await;
+                    for tx in &mined_txs {
+                        for key in &tx.ring_public_keys {
+                            pool.insert_and_save(key.clone(), &my_wallet_arc.get_address());
+                        }
+                    }
+                    drop(pool);
+
                     update_my_account_state(&my_wallet_arc, mined_txs.clone());
                     
                     if let Ok(txs_json) = serde_json::to_string(&mined_txs) {

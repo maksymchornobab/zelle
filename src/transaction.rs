@@ -1,15 +1,17 @@
 use serde::{Serialize, Deserialize};
 use blake3::Hasher;
-use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+use crate::wallet::RingSignature; 
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Transaction {
+    #[serde(skip_serializing, default)] 
     pub sender_address: String,
+    
     pub ephemeral_receiver: String, 
     pub amount: f64,
     pub ring_public_keys: Vec<String>, 
     pub tx_id: String,
-    pub signature: Vec<u8>,
+    pub signature: Option<RingSignature>,
 }
 
 impl Transaction {
@@ -20,7 +22,7 @@ impl Transaction {
             amount,
             ring_public_keys: ring_keys,
             tx_id: String::new(),
-            signature: Vec::new(),
+            signature: None, // За замовчуванням підпису немає
         };
         tx.tx_id = tx.calculate_hash();
         tx
@@ -28,7 +30,6 @@ impl Transaction {
 
     pub fn calculate_hash(&self) -> String {
         let mut hasher = Hasher::new();
-        hasher.update(self.sender_address.as_bytes());
         hasher.update(self.ephemeral_receiver.as_bytes());
         hasher.update(&self.amount.to_be_bytes());
         for key in &self.ring_public_keys {
@@ -37,27 +38,33 @@ impl Transaction {
         hasher.finalize().to_hex().to_string()
     }
 
+
     pub fn verify_signature(&self) -> bool {
+
         if self.sender_address == "SYSTEM" { return true; }
-        if self.signature.is_empty() { return false; }
+        
 
-        let signature_array: [u8; 64] = match self.signature.clone().try_into() {
-            Ok(arr) => arr,
-            Err(_) => return false,
+        let sig = match &self.signature {
+            Some(s) => s,
+            None => return false,
         };
-        let signature = Signature::from_bytes(&signature_array);
 
-        for pub_key_hex in &self.ring_public_keys {
-            if let Ok(pub_key_bytes) = hex::decode(pub_key_hex) {
-                if let Ok(pub_key_array) = pub_key_bytes.try_into() {
-                    if let Ok(verifying_key) = VerifyingKey::from_bytes(&pub_key_array) {
-                        if verifying_key.verify(self.tx_id.as_bytes(), &signature).is_ok() {
-                            return true; 
-                        }
-                    }
-                }
-            }
+        if sig.responses.len() != self.ring_public_keys.len() {
+            return false;
         }
-        false
+
+
+        if sig.responses.iter().any(|r| r.is_empty()) {
+            return false;
+        }
+
+        let mut challenge_hasher = Hasher::new();
+        challenge_hasher.update(self.tx_id.as_bytes());
+        for key in &self.ring_public_keys {
+            challenge_hasher.update(key.as_bytes());
+        }
+        let expected_challenge = challenge_hasher.finalize().to_hex().to_string();
+
+        sig.challenge == expected_challenge
     }
 }

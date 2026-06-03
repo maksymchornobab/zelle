@@ -54,14 +54,16 @@ impl StateChannel {
         let decoy = hex::encode(decoy_bytes);
         let ring_keys = vec![sender_address.clone(), decoy];
 
-        let mut tx = Transaction::new(sender_address, ephemeral_receiver, amount, ring_keys);
+        let mut tx = Transaction::new(sender_address, ephemeral_receiver, amount, ring_keys.clone());
         
+        // Модифікуємо tx_id під специфіку каналу, як і було раніше
         tx.tx_id = blake3::hash(format!("{}{}", tx.tx_id, self.channel_id).as_bytes())
             .to_hex()
             .to_string();
 
-        let signature = from_wallet.sign(tx.tx_id.as_bytes());
-        tx.signature = signature.to_bytes().to_vec();
+        // 🔥 Замість старого методу використовуємо кільцевий підпис
+        let ring_sig = from_wallet.sign_ring(tx.tx_id.as_bytes(), &ring_keys);
+        tx.signature = Some(ring_sig);
 
         self.local_history.push(tx.clone());
         println!("[SHAR 2 TX] Оперативний мікроплатіж зафіксовано в RAM: {} ZL.", amount);
@@ -100,11 +102,12 @@ impl StateChannel {
             sender,
             final_ephemeral_receiver,
             final_amount,
-            ring_keys,
+            ring_keys.clone(),
         );
 
-        let signature = from_wallet.sign(settlement_tx.tx_id.as_bytes());
-        settlement_tx.signature = signature.to_bytes().to_vec();
+        // 🔥 Замість старого методу використовуємо кільцевий підпис
+        let ring_sig = from_wallet.sign_ring(settlement_tx.tx_id.as_bytes(), &ring_keys);
+        settlement_tx.signature = Some(ring_sig);
 
         println!("[SHAR 2] Фінальний чек готов для відправки на Layer 1 двигун.");
         settlement_tx

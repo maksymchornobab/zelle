@@ -1,4 +1,4 @@
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use std::fs::File;
@@ -8,9 +8,7 @@ use serde::{Serialize, Deserialize};
 use blake3::Hasher;
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit};
-
-// Імпортуємо твій контейнер захисту пам'яті
-use verteidiger::SecureSeed; 
+use verteidiger::SecureSeed;
 
 const BLOOM_FILTER_BYTES: usize = 32 * 1024; 
 const BLOOM_HASH_FUNCTIONS: u8 = 7;
@@ -18,6 +16,12 @@ const BLOOM_HASH_FUNCTIONS: u8 = 7;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BloomFilter {
     pub bits: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RingSignature {
+    pub challenge: String,       
+    pub responses: Vec<String>,
 }
 
 impl BloomFilter {
@@ -237,6 +241,51 @@ impl Wallet {
             encryption_key: self.encryption_key,
         };
         wallet_clone.write_encrypted_to_disk(new_payload, &salt);
+    }
+
+    pub fn sign_ring(&self, message: &[u8], ring_public_keys: &[String]) -> RingSignature {
+        let my_pub_hex = self.get_address();
+        
+        // Знаходимо свій індекс у кільці
+        let my_index = ring_public_keys.iter()
+            .position(|k| k == &my_pub_hex)
+            .expect("Мій власний ключ повинен бути частиною кільця!");
+
+        // Математична імітація формування кільця через BLAKE3 та Ed25519
+        // У реальному CLSAG тут обчислюються key images (I = x * H(P)) для захисту від Double Spending
+        let mut responses = vec![String::new(); ring_public_keys.len()];
+        
+        // Генеруємо випадкові відповіді для приманок (decoy)
+        for i in 0..ring_public_keys.len() {
+            if i != my_index {
+                let mut fake_resp = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut fake_resp);
+                responses[i] = hex::encode(fake_resp);
+            }
+        }
+
+        // Обчислюємо справжню відповідь для нашого індексу, використовуючи захищений RAM-seed
+        let true_response = self.secret_seed.use_seed(|raw_seed| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(message);
+            hasher.update(raw_seed);
+            hasher.finalize().to_hex().to_string()
+        });
+        
+        responses[my_index] = true_response;
+
+        // Формуємо загальний challenge кільця
+        let mut challenge_hasher = blake3::Hasher::new();
+        challenge_hasher.update(message);
+        for key in ring_public_keys {
+            challenge_hasher.update(key.as_bytes());
+        }
+        let challenge = challenge_hasher.finalize().to_hex().to_string();
+
+        RingSignature {
+            challenge,
+            responses,
+        }
     }
 
     fn write_encrypted_to_disk(&mut self, payload: WalletPayload, salt: &[u8]) {
